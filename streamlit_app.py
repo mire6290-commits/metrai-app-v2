@@ -30,7 +30,7 @@ with st.sidebar:
             with st.spinner("Analyse du plan en cours par l'IA..."):
                 try:
                     files = {"file": (uploaded_file.name, uploaded_file, "application/pdf")}
-                    response = requests.post(f"{API_URL}/extract", files=files, timeout=120)
+                    response = requests.post(f"{API_URL}/extract", files=files, timeout=600)
                     
                     if response.status_code == 200:
                         data = response.json()
