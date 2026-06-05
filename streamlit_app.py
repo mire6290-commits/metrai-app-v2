@@ -24,7 +24,11 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Choisissez un plan PDF", type="pdf", on_change=reset_state)
     
     if uploaded_file is not None:
-        if st.button("Lancer l'analyse AI 🚀", use_container_width=True, type="primary"):
+        btn_placeholder = st.empty()
+        clicked = btn_placeholder.button("Lancer l'analyse AI 🚀", use_container_width=True, type="primary")
+        
+        if clicked:
+            btn_placeholder.button("Analyse en cours... Patientez ⏳", disabled=True, use_container_width=True)
             reset_state()
             st.session_state.analyzed = False
             with st.spinner("Analyse du plan en cours par l'IA..."):
