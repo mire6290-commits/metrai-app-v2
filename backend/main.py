@@ -167,8 +167,8 @@ async def extract(
 
         all_results: list[VisionResult] = []
 
-        # High-Res Tiling Architecture
-        logger.info("Using VisionLLMEngine with High-Res Tiling.")
+        # Agentic Zoning Architecture
+        logger.info("Using VisionLLMEngine with Agentic Zoning.")
         _parser.dpi = 300 # Force high resolution for maximum precision
         page_images = _parser.render_pages(str(tmp_path))
         if pages != "all":
@@ -176,19 +176,54 @@ async def extract(
             page_images = [p for p in page_images if p.page_number in requested]
 
         for page_img in page_images:
-            if _parser.should_tile(page_img):
-                tiles = _parser.tile_page(page_img)
-                logger.info(f"Page {page_img.page_number} is large. Tiling into {len(tiles)} pieces.")
-                tile_results = []
-                for tile in tiles:
-                    res = _vision.analyze(tile.image, page_number=tile.page_number, tile_index=tile.tile_index, context=context)
-                    tile_results.append(res)
-                merged = merge_tile_results(tile_results)
+            # Pass 1: Detect zones using a lower resolution version to save tokens/time
+            logger.info(f"Detecting zones for page {page_img.page_number}...")
+            downscaled = page_img.image.copy()
+            downscaled.thumbnail((1024, 1024))
+            zones = _vision.detect_zones(downscaled)
+            logger.info(f"Page {page_img.page_number} zones detected: {len(zones)}")
+
+            zone_results = []
+            img_w, img_h = page_img.image.size
+            
+            for z_idx, zone in enumerate(zones):
+                zt = zone.get("zone_type", "unknown")
+                bbox = zone.get("bbox_normalized", [0.0, 0.0, 1.0, 1.0])
+                
+                # Ensure bbox is valid
+                if not isinstance(bbox, list) or len(bbox) != 4:
+                    bbox = [0.0, 0.0, 1.0, 1.0]
+                
+                y_min, x_min, y_max, x_max = bbox
+                box_px = (
+                    int(x_min * img_w),
+                    int(y_min * img_h),
+                    int(x_max * img_w),
+                    int(y_max * img_h)
+                )
+                
+                # Add a small padding to the crop (5% overlap) to avoid cutting text
+                padding_x = int(img_w * 0.05)
+                padding_y = int(img_h * 0.05)
+                box_px = (
+                    max(0, box_px[0] - padding_x),
+                    max(0, box_px[1] - padding_y),
+                    min(img_w, box_px[2] + padding_x),
+                    min(img_h, box_px[3] + padding_y)
+                )
+                
+                logger.info(f"Processing zone {z_idx+1}/{len(zones)}: {zt} at {box_px}")
+                crop_img = page_img.image.crop(box_px)
+                
+                ctx = context.copy()
+                ctx["zone_type"] = zt
+                
+                res = _vision.analyze(crop_img, page_number=page_img.page_number, tile_index=z_idx, context=ctx)
+                zone_results.append(res)
+
+            if zone_results:
+                merged = merge_tile_results(zone_results)
                 all_results.append(merged)
-            else:
-                logger.info(f"Processing page {page_img.page_number} as single image")
-                res = _vision.analyze(page_img.image, page_number=page_img.page_number, context=context)
-                all_results.append(res)
 
         if not all_results:
             raise HTTPException(status_code=422, detail="No profiles extracted — check PDF and API keys")
@@ -270,7 +305,7 @@ async def extract_async(
                     'scale_hint': scale_hint or 'unknown',
                 }
 
-                logger.info("Using VisionLLMEngine with High-Res Tiling (Async).")
+                logger.info("Using VisionLLMEngine with Agentic Zoning (Async).")
                 _parser.dpi = 300
                 page_images = _parser.render_pages(str(tmp_path))
                 if pages != "all":
@@ -279,18 +314,46 @@ async def extract_async(
 
                 all_results = []
                 for page_img in page_images:
-                    if _parser.should_tile(page_img):
-                        tiles = _parser.tile_page(page_img)
-                        logger.info(f"Page {page_img.page_number} tiled into {len(tiles)} pieces.")
-                        tile_results = []
-                        for tile in tiles:
-                            res = _vision.analyze(tile.image, page_number=tile.page_number, tile_index=tile.tile_index, context=context)
-                            tile_results.append(res)
-                        merged = merge_tile_results(tile_results)
+                    logger.info(f"Detecting zones for page {page_img.page_number}...")
+                    downscaled = page_img.image.copy()
+                    downscaled.thumbnail((1024, 1024))
+                    zones = _vision.detect_zones(downscaled)
+                    
+                    zone_results = []
+                    img_w, img_h = page_img.image.size
+                    
+                    for z_idx, zone in enumerate(zones):
+                        zt = zone.get("zone_type", "unknown")
+                        bbox = zone.get("bbox_normalized", [0.0, 0.0, 1.0, 1.0])
+                        if not isinstance(bbox, list) or len(bbox) != 4:
+                            bbox = [0.0, 0.0, 1.0, 1.0]
+                        
+                        y_min, x_min, y_max, x_max = bbox
+                        box_px = (
+                            int(x_min * img_w),
+                            int(y_min * img_h),
+                            int(x_max * img_w),
+                            int(y_max * img_h)
+                        )
+                        padding_x = int(img_w * 0.05)
+                        padding_y = int(img_h * 0.05)
+                        box_px = (
+                            max(0, box_px[0] - padding_x),
+                            max(0, box_px[1] - padding_y),
+                            min(img_w, box_px[2] + padding_x),
+                            min(img_h, box_px[3] + padding_y)
+                        )
+                        
+                        crop_img = page_img.image.crop(box_px)
+                        ctx = context.copy()
+                        ctx["zone_type"] = zt
+                        
+                        res = _vision.analyze(crop_img, page_number=page_img.page_number, tile_index=z_idx, context=ctx)
+                        zone_results.append(res)
+
+                    if zone_results:
+                        merged = merge_tile_results(zone_results)
                         all_results.append(merged)
-                    else:
-                        res = _vision.analyze(page_img.image, page_number=page_img.page_number, context=context)
-                        all_results.append(res)
 
                 if not all_results:
                     TASKS_STORE[task_id] = {'status': 'error', 'detail': 'No profiles extracted'}
@@ -457,6 +520,9 @@ def _enrich_profile(p: Any) -> ProfileOut:
     
     # Format "IPE400" to "IPE 400" to match RulesDB
     designation = re.sub(r'^([A-Z]+)(\d+)', r'\1 \2', designation)
+    
+    # Fix 'X' or 'x' instead of '*' in L or 2L profiles (e.g. "L 60X6" -> "L 60*6")
+    designation = re.sub(r'(L|2L)\s*(\d+)\s*[X]\s*(\d+)', r'\1 \2*\3', designation)
     
     masse = _RULES_DB.get(designation)
     # Fallback to check if it's L A*A*T

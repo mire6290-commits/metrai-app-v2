@@ -305,6 +305,38 @@ class VisionLLMEngine:
         return self._parse_response(raw, provider_used, page_number, tile_index)
 
     # ------------------------------------------------------------------
+    # Pass 1: Cartography / Zoning
+    # ------------------------------------------------------------------
+
+    def detect_zones(self, image: Image.Image) -> list[dict]:
+        """
+        Pass 1: Detect drawing zones in the image using the Vision provider.
+        Returns a list of dicts: {"zone_type": "...", "bbox_normalized": [ymin, xmin, ymax, xmax]}
+        """
+        prompt = """
+        You are an AI assistant analyzing a structural steel drawing.
+        Identify the distinct drawing zones (e.g., "plan de toiture", "élévation pignon", "détail assemblage", "coupe transversale").
+        For each zone, provide its type and a normalized bounding box [ymin, xmin, ymax, xmax] where values are floats between 0.0 and 1.0.
+        Return ONLY a JSON array of objects, e.g.:
+        [
+            {"zone_type": "plan de toiture", "bbox_normalized": [0.0, 0.0, 0.5, 1.0]},
+            {"zone_type": "élévation pignon", "bbox_normalized": [0.5, 0.0, 1.0, 0.5]},
+            {"zone_type": "détail assemblage", "bbox_normalized": [0.5, 0.5, 1.0, 1.0]}
+        ]
+        If the entire page is a single drawing or you cannot segment it clearly, return a single zone with [0.0, 0.0, 1.0, 1.0].
+        """
+        try:
+            raw = self._call_provider(self.primary, image, prompt)
+            clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            zones = json.loads(clean)
+            if not isinstance(zones, list) or len(zones) == 0:
+                zones = [{"zone_type": "full_page", "bbox_normalized": [0.0, 0.0, 1.0, 1.0]}]
+            return zones
+        except Exception as e:
+            logger.warning(f"Failed to detect zones: {e}")
+            return [{"zone_type": "full_page", "bbox_normalized": [0.0, 0.0, 1.0, 1.0]}]
+
+    # ------------------------------------------------------------------
     # Provider dispatch
     # ------------------------------------------------------------------
 
@@ -485,6 +517,15 @@ class VisionLLMEngine:
                 lines.append(f"- Expected scale (from metadata): {context['scale_hint']}")
             if "drawing_type" in context:
                 lines.append(f"- Drawing type: {context['drawing_type']}")
+            if "zone_type" in context:
+                lines.append(f"- Current Zone Type: {context['zone_type']}")
+                zt = context["zone_type"].lower()
+                if "toiture" in zt or "long-pan" in zt:
+                    lines.append("CRITICAL INSTRUCTION: This is a main elevation or roof plan. Purlins (pannes) and wall beams (lisses) span the ENTIRE building length. DO NOT CHOP THEM into bay segments. Length is usually the total building length (e.g., 15000). Ignore column vertical heights here if they are confusing.")
+                elif "élévation" in zt or "coupe" in zt or "pignon" in zt:
+                    lines.append("CRITICAL INSTRUCTION: This is a section or elevation. Extract exact column heights and brace lengths here. Do not mistake building width for column height.")
+                elif "détail" in zt:
+                    lines.append("CRITICAL INSTRUCTION: This is a connection detail. Ignore main beams and columns. Focus strictly on extracting PLATINES (TN), GOUSSETS, RAIDISSEURS, and BOLTS.")
         lines.append("\nExtract all visible steel profiles and return the JSON format specified. Nothing else.")
         return "\n".join(lines)
 
